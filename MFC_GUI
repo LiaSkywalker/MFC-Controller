@@ -1,0 +1,185 @@
+import requests
+import re
+import tkinter as tk
+from tkinter import ttk
+from threading import Thread
+from time import sleep
+from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# URL to fetch the mfc.js file
+URL = "http://192.168.2.155/mfc.js"
+
+# Data storage for plotting
+pressure_data = deque(maxlen=100)  # Stores the last 100 pressure values
+flow_data = deque(maxlen=100)  # Stores the last 100 flow rate values
+time_data = deque(maxlen=100)  # Stores the last 100 time steps
+
+# Available gases
+GASES = ["Nitrogen", "Argon"]
+
+# Function to fetch data from the MFC URL
+def fetch_mfc_data():
+    try:
+        response = requests.get(URL, timeout=5)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching mfc.js: {e}")
+        return None
+
+# Function to extract the flow rate
+def find_flow_rate(response_text):
+    match = re.search(r"mfc\.flow_value\s*=\s*([\d\.]+);", response_text)
+    if match:
+        return float(match.group(1))
+    return None
+
+# Function to extract the pressure value
+def find_pressure_value(response_text):
+    match = re.search(r"mfc\.pressure_value\s*=\s*([\d\.]+);", response_text)
+    if match:
+        pressure_value = float(match.group(1))
+        return pressure_value, pressure_value * 1.333  # Return Torr and mbar
+    return None, None
+
+# Function to update the GUI labels and plots
+def update_gui():
+    time_step = 0
+    while True:
+        response_text = fetch_mfc_data()
+        if response_text:
+            # Extract values
+            flow_rate = find_flow_rate(response_text)
+            pressure_torr, pressure_mbar = find_pressure_value(response_text)
+
+            # Get the selected gas type
+            selected_gas = gas_type_var.get()
+
+            # Update labels
+            if flow_rate is not None:
+                flow_rate_label["text"] = f"Flow Rate: {flow_rate:.3f} sccm ({selected_gas})"
+                flow_data.append(flow_rate)
+            else:
+                flow_rate_label["text"] = "Flow Rate: N/A"
+
+            if pressure_torr is not None and pressure_mbar is not None:
+                pressure_torr_label["text"] = f"Pressure (Torr): {pressure_torr:.3f}"
+                pressure_mbar_label["text"] = f"Pressure (mbar): {pressure_mbar:.3f}"
+                pressure_data.append(pressure_torr)
+
+                # Update pressure difference and indication
+                try:
+                    target_pressure = float(target_pressure_var.get())
+                    pressure_diff = target_pressure - pressure_torr
+                    pressure_diff_label["text"] = f"ΔPressure (Torr): {pressure_diff:.3f}"
+                    if abs(pressure_diff) < 1e-2:  # Threshold for matching
+                        flash_background(pressure_torr_label, "green")
+                except ValueError:
+                    pressure_diff_label["text"] = "ΔPressure: Invalid input"
+            else:
+                pressure_torr_label["text"] = "Pressure (Torr): N/A"
+                pressure_mbar_label["text"] = "Pressure (mbar): N/A"
+                pressure_diff_label["text"] = "ΔPressure: N/A"
+
+            # Update time data
+            time_data.append(time_step)
+            time_step += 1
+
+            # Update plots
+            update_plots()
+        else:
+            flow_rate_label["text"] = "Flow Rate: Error"
+            pressure_torr_label["text"] = "Pressure (Torr): Error"
+            pressure_mbar_label["text"] = "Pressure (mbar): Error"
+            pressure_diff_label["text"] = "ΔPressure: Error"
+
+        sleep(1)
+
+# Function to flash the background of a label
+def flash_background(label, color):
+    original_color = label["background"]
+    label["background"] = color
+    label.after(500, lambda: label.config(background=original_color))
+
+# Function to update the plots
+def update_plots():
+    pressure_line.set_data(time_data, pressure_data)
+    flow_line.set_data(time_data, flow_data)
+
+    ax_pressure.relim()
+    ax_pressure.autoscale_view()
+    ax_flow.relim()
+    ax_flow.autoscale_view()
+
+    canvas.draw()
+
+# Create the main GUI window
+root = tk.Tk()
+root.title("MFC Monitor")
+root.geometry("1000x600")
+
+# Create a frame for text on the left
+text_frame = ttk.Frame(root)
+text_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+# Create labels in the text frame
+flow_rate_label = tk.Label(text_frame, text="Flow Rate: N/A", font=("Arial", 12), bg="lightgreen")
+flow_rate_label.pack(pady=5)
+
+pressure_torr_label = tk.Label(text_frame, text="Pressure (Torr): N/A", font=("Arial", 12), bg="lightblue")
+pressure_torr_label.pack(pady=5)
+
+pressure_mbar_label = ttk.Label(text_frame, text="Pressure (mbar): N/A", font=("Arial", 12))
+pressure_mbar_label.pack(pady=5)
+
+pressure_diff_label = ttk.Label(text_frame, text="ΔPressure: Not set", font=("Arial", 12))
+pressure_diff_label.pack(pady=5)
+
+# Input field for target pressure in the text frame
+target_pressure_var = tk.StringVar()
+target_pressure_label = ttk.Label(text_frame, text="Set Target Pressure (Torr):", font=("Arial", 10))
+target_pressure_label.pack(pady=5)
+target_pressure_entry = ttk.Entry(text_frame, textvariable=target_pressure_var, font=("Arial", 10))
+target_pressure_entry.pack(pady=5)
+
+# Combobox for selecting the gas type
+gas_type_var = tk.StringVar(value=GASES[0])
+gas_type_label = ttk.Label(text_frame, text="Select Gas Type:", font=("Arial", 10))
+gas_type_label.pack(pady=5)
+gas_type_combobox = ttk.Combobox(text_frame, textvariable=gas_type_var, values=GASES, state="readonly", font=("Arial", 10))
+gas_type_combobox.pack(pady=5)
+
+# Create a frame for plots on the right
+plot_frame = ttk.Frame(root)
+plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+# Create Matplotlib figure and axes for plotting
+fig, (ax_pressure, ax_flow) = plt.subplots(2, 1, figsize=(8, 6), dpi=100)
+
+# Initialize plots
+pressure_line, = ax_pressure.plot([], [], label="Pressure (Torr)", color="blue")
+flow_line, = ax_flow.plot([], [], label="Flow Rate (sccm)", color="green")
+
+ax_pressure.set_title("Measured Pressure")
+ax_pressure.set_xlabel("Time (s)")
+ax_pressure.set_ylabel("Pressure (Torr)")
+ax_pressure.legend()
+
+ax_flow.set_title("Flow Rate")
+ax_flow.set_xlabel("Time (s)")
+ax_flow.set_ylabel("Flow Rate (sccm)")
+ax_flow.legend()
+
+# Embed the Matplotlib figure into Tkinter
+canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+canvas_widget = canvas.get_tk_widget()
+canvas_widget.pack(fill=tk.BOTH, expand=True)
+
+# Start a thread to update the GUI
+thread = Thread(target=update_gui, daemon=True)
+thread.start()
+
+# Run the GUI event loop
+root.mainloop()
